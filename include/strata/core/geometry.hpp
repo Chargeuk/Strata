@@ -52,10 +52,10 @@ struct ModelGeometry {
     // MoE, on every layer
     int64_t n_expert = 512;         ///< expert_count; pruned variants (GSQ-RCO Coder) ship fewer
     int64_t n_expert_used = 10;     ///< expert_used_count
-    int64_t n_ff = 640;             ///< expert_feed_forward_length (= expert_shared_feed_forward_length)
+    int64_t n_ff = 640;             ///< expert_feed_forward_length
 
     // appended for the model families (Qwen3.6 = qwen35moe); the defaults keep Flash-Next's values
-    int64_t n_ff_shexp = 640;       ///< the shared expert's FFN width (qwen4exp: equal to n_ff, read_geometry checks)
+    int64_t n_ff_shexp = 640;       ///< expert_shared_feed_forward_length
     ModelFamily family = ModelFamily::Qwen4Exp;
     int64_t n_mtp_layers = 0;       ///< MTP blocks inside the model file, after the trunk (qwen35moe: blk.40)
 

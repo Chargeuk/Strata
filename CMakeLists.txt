@@ -24,6 +24,9 @@ include(${CMAKE_CURRENT_SOURCE_DIR}/cmake/strata_gpu_engine.cmake)    # the GPU 
 # own project that takes the unported sources from src/; with this on, nothing below is configured.
 option(STRATA_ENABLE_SYCL "EXPERIMENTAL: build the Intel Arc (SYCL) engine from sycl/ - docs/INTEL_ARC.md" OFF)
 if(STRATA_ENABLE_SYCL)
+  if(_strata_geo_label STREQUAL "flash_next_az")
+    message(FATAL_ERROR "flash_next_az is supported only by the CUDA engine")
+  endif()
   if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
     message(FATAL_ERROR "STRATA_ENABLE_SYCL is a separate backend; leave STRATA_ENABLE_CUDA and STRATA_ENABLE_HIP off")
   endif()
@@ -102,6 +105,9 @@ if(STRATA_HIP_GFX906)
   set(STRATA_ENABLE_CUDA ON CACHE BOOL "" FORCE)
 endif()
 option(STRATA_ENABLE_HIP "Build the HIP targets for wave32 AMD GPUs (gfx1100, gfx1201; gfx1012/gfx1030 unvalidated)" OFF)
+if(_strata_geo_label STREQUAL "flash_next_az" AND (NOT STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP OR STRATA_HIP_GFX906))
+  message(FATAL_ERROR "flash_next_az requires the CUDA backend")
+endif()
 option(STRATA_PREFILL_MMQ "Build the optional GGML MMQ prefill path for HIP (only together with STRATA_MMQ=ON)" OFF)
 # P4-SPLIT: llama.cpp's MMQ prompt kernels (strata_mmq, strata_mmq_w4a4, strata_kq) are built only with -DSTRATA_MMQ=ON: on CUDA, and on HIP
 # together with STRATA_PREFILL_MMQ=ON.  The default (OFF) leaves them out of both.  Strata's own prompt kernels (strata_pf_own: the fused experts

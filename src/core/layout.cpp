@@ -58,9 +58,9 @@ bool check_one(const WeightTable& t, const ModelGeometry& g, int64_t layer, std:
         {"hc_ffn_inject.weight", g.hc_dim(), g.hc, false, false},
         // MoE, EVERY layer
         {"ffn_gate_inp.weight", g.n_embd, g.n_expert, false, false},
-        {"ffn_gate_shexp.weight", g.n_embd, g.n_ff, false, false},
-        {"ffn_up_shexp.weight", g.n_embd, g.n_ff, false, false},
-        {"ffn_down_shexp.weight", g.n_ff, g.n_embd, false, false},
+        {"ffn_gate_shexp.weight", g.n_embd, g.n_ff_shexp, false, false},
+        {"ffn_up_shexp.weight", g.n_embd, g.n_ff_shexp, false, false},
+        {"ffn_down_shexp.weight", g.n_ff_shexp, g.n_embd, false, false},
         // GDN only
         {"attn_qkv.weight", g.n_embd, g.ssm_conv_channels, false, true},
         {"attn_gate.weight", g.n_embd, g.ssm_value_dim, false, true},

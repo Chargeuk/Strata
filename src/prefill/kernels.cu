@@ -25,7 +25,7 @@ namespace {
 
 constexpr int N = strata::core::kCompiledGeometry.n_embd, HC = strata::core::kCompiledGeometry.hc, D = N * HC, LR = strata::core::kCompiledGeometry.hc_lr;
 constexpr int KU = strata::core::kCompiledGeometry.n_expert_used;   // routed experts per token (10 for Flash-Next)
-constexpr int64_t FFC = strata::core::kCompiledGeometry.n_ff;   // the routed (and shared) expert width: 640 for Flash-Next
+constexpr int64_t FFC = strata::core::kCompiledGeometry.n_ff;   // routed expert width
 constexpr int S = strata::core::kCompiledGeometry.ssm_state_size, HK = strata::core::kCompiledGeometry.ssm_k_heads, HV = strata::core::kCompiledGeometry.ssm_v_heads, C = strata::core::kCompiledGeometry.ssm_conv_channels;
 
 __device__ __forceinline__ float warp_sum(float v) {
@@ -2320,7 +2320,7 @@ __global__ void swiglu_split_f16_kernel(const float* __restrict__ gu, uint16_t* 
 __global__ void swiglu_pair_kernel(const float* __restrict__ g, const float* __restrict__ u, uint16_t* __restrict__ h16,
                                    int64_t n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n * FFC) return;
+    if (i >= n * strata::core::kCompiledGeometry.n_ff_shexp) return;
     const float a = g[i];
     h16[i] = hf_sat(a / (1.0f + __expf(-a)) * u[i]);
 }
@@ -3282,7 +3282,7 @@ void swiglu_split_f16(const float* gu, uint16_t* h16, int64_t rows, int n_ff, bo
     check("swiglu_split_f16");
 }
 void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream) {
-    swiglu_pair_kernel<<<blocks_for(n * FFC), 256, 0, (cudaStream_t) stream>>>(g, u, h16, n);
+    swiglu_pair_kernel<<<blocks_for(n * strata::core::kCompiledGeometry.n_ff_shexp), 256, 0, (cudaStream_t) stream>>>(g, u, h16, n);
     check("swiglu_pair");
 }
 namespace {

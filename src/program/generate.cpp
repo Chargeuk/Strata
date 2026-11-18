@@ -4789,6 +4789,21 @@ int main(int argc, char** argv) {
         const long long wr = w ? std::atoll(w) : 0;
         if (n > 0 && n < o.adapt_every && wr > 0) { o.adapt_warm_every = n; o.adapt_warm_rounds = wr; }
     }
+    if (strata::core::kCompiledGeometry.n_ff_shexp != strata::core::kCompiledGeometry.n_ff) {
+#if defined(STRATA_GEOMETRY_FLASH_NEXT_AZ)
+        if (o.prefill_until > 0) {
+            std::fprintf(stderr, "strata generate: --prefill-until is not supported by flash_next_az: the remaining prompt would be skipped\n");
+            return 2;
+        }
+#endif
+        if (o.native_preset.empty() || !o.mtp.empty() || !o.draft.empty() || o.vision ||
+            !o.layer_split.empty() || o.peer_device >= 1 ||
+            std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int n) { return n > 0; }) ||
+            std::any_of(o.expert_cache_remote_auto.begin(), o.expert_cache_remote_auto.end(), [](bool on) { return on; })) {
+            std::fprintf(stderr, "strata generate: this unequal-width geometry requires --native and supports single-GPU text without draft models only\n");
+            return 2;
+        }
+    }
     strata::core::layer_set_shared_early(!o.shared_late);
     if (!o.native_preset.empty()) {
         try {

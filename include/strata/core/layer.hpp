@@ -114,7 +114,7 @@ struct MoEBuffers {
     int* ids = nullptr;           ///< k
     float* weights = nullptr;     ///< k
     float* shared = nullptr;      ///< n_embd
-    float* sh_scratch = nullptr;  ///< shared_expert_scratch_bytes(n_ff): the shared expert's own scratch
+    float* sh_scratch = nullptr;  ///< shared_expert_scratch_bytes(n_ff_shexp): the shared expert's own scratch
     uint8_t* x_q8_0 = nullptr;    ///< n_embd, block_q8_0 - the shared expert's weights want Q8_0 on the layers
                                   ///< whose types are Q2_0/Q4_0/Q5_0/Q8_0/IQ4_NL, which is most of them
     uint8_t* x_q8k = nullptr;     ///< n_embd, block_q8_K - and Q8_K on the K-quant ones

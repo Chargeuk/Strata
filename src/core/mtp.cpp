@@ -289,6 +289,10 @@ bool MtpDrafter::make_q4_head(std::string& err) {
 
 bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, SessionState& ss, int max_t, std::string& err,
                       int64_t window, const MtpDrafter* shared) {
+    if (g.n_ff_shexp != g.n_ff) {
+        err = "mtp: unequal shared and routed expert widths are not supported";
+        return false;
+    }
 #if defined(STRATA_GPU_METAL)
     (void) window; (void) shared;
     g_ = &g;

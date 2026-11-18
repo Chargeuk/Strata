@@ -52,6 +52,7 @@ inline bool geometry_from_gguf(const strata::GgufFile& meta, ModelGeometry& g, i
     num("expert_used_count", top_k);
     g.n_expert_used = top_k;
     num("expert_feed_forward_length", g.n_ff);
+    if (family == strata::ModelFamily::Qwen4Exp) g.n_ff_shexp = g.n_ff;
     num("expert_shared_feed_forward_length", g.n_ff_shexp);
     num("ssm.conv_kernel", g.ssm_d_conv);
     num("ssm.state_size", g.ssm_state_size);
@@ -101,6 +102,8 @@ inline std::string compiled_geometry_mismatch(const ModelGeometry& g) {
     if (g.family != c.family)
         return std::string("the model is ") + strata::model_family_title(g.family) + ", this engine's kernels are built "
                "for " + strata::model_family_title(c.family);
+    if (c.n_ff_shexp != c.n_ff && (g.n_expert != c.n_expert || g.n_expert_used != c.n_expert_used))
+        return "this unequal-width geometry requires the compiled expert count and expert_used_count";
     struct F {
         const char* what;
         int64_t got, want;

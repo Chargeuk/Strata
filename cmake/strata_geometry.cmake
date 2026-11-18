@@ -1,6 +1,6 @@
 # cmake/strata_geometry.cmake - choose the model shape the kernels are compiled for (include/strata/core/geometry.hpp).
 #
-#   -DSTRATA_GEOMETRY=<name>        include/strata/core/geometries/<name>.hpp   (default: flash_next)
+#   -DSTRATA_GEOMETRY=<name>        include/strata/core/geometries/<name>.hpp   (default: flash_next; flash_next_az selects the AZ variant)
 #   -DSTRATA_GEOMETRY_FILE=<path>   any geometry header, for a shape that is not in the tree yet (day one of a new model)
 #
 # With neither set (or STRATA_GEOMETRY=flash_next) nothing is added: no include directory, no definition, so the compile
@@ -24,6 +24,13 @@ if(STRATA_GEOMETRY_FILE)
   endif()
   get_filename_component(_strata_geo_header "${STRATA_GEOMETRY_FILE}" ABSOLUTE)
   get_filename_component(_strata_geo_label "${STRATA_GEOMETRY_FILE}" NAME_WE)
+elseif(STRATA_GEOMETRY STREQUAL "flash_next_az")
+  if(PROJECT_NAME STREQUAL "strata_metal" OR PROJECT_NAME STREQUAL "strata_sycl")
+    message(FATAL_ERROR "flash_next_az is supported only by the CUDA engine")
+  endif()
+  set(_strata_geo_header "${_strata_geo_dir}/flash_next.hpp")
+  set(_strata_geo_label "flash_next_az")
+  set(_strata_geo_define "#define STRATA_GEOMETRY_FLASH_NEXT_AZ 1\n")
 elseif(NOT STRATA_GEOMETRY STREQUAL "flash_next")
   if(NOT EXISTS "${_strata_geo_dir}/${STRATA_GEOMETRY}.hpp")
     string(REPLACE ";" ", " _strata_geo_list "${_strata_geo_names}")
@@ -37,7 +44,7 @@ if(_strata_geo_header)
   set(_strata_geo_out "${CMAKE_BINARY_DIR}/strata_geometry")
   file(MAKE_DIRECTORY "${_strata_geo_out}/strata/core")
   file(WRITE "${_strata_geo_out}/strata/core/geometry_selected.hpp.tmp"
-       "// written by cmake/strata_geometry.cmake: the shape this build is compiled for\n#pragma once\n#include \"${_strata_geo_header}\"\n")
+       "// written by cmake/strata_geometry.cmake: the shape this build is compiled for\n#pragma once\n${_strata_geo_define}#include \"${_strata_geo_header}\"\n")
   configure_file("${_strata_geo_out}/strata/core/geometry_selected.hpp.tmp" "${_strata_geo_out}/strata/core/geometry_selected.hpp" COPYONLY)
   include_directories(BEFORE "${_strata_geo_out}")
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_strata_geo_header}")

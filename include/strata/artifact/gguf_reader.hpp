@@ -729,17 +729,14 @@ inline std::string read_geometry(const GgufFile& f, core::ModelGeometry& g) {
     for (const Key& k : keys)
         if (!read_int(k.key, g.*k.field, k.required)) return err;
 
-    int64_t value_length = g.head_dim, ff_shexp = g.n_ff;
+    int64_t value_length = g.head_dim;
+    g.n_ff_shexp = g.n_ff;
     if (!read_int("attention.value_length", value_length, false) ||
-        !read_int("expert_shared_feed_forward_length", ff_shexp, false))
+        !read_int("expert_shared_feed_forward_length", g.n_ff_shexp, false))
         return err;
     if (value_length != g.head_dim)
         return p + "attention.value_length = " + std::to_string(value_length) + " and attention.key_length = " +
                std::to_string(g.head_dim) + ": the attention kernels use one head width for both";
-    if (ff_shexp != g.n_ff)
-        return p + "expert_shared_feed_forward_length = " + std::to_string(ff_shexp) +
-               " and expert_feed_forward_length = " + std::to_string(g.n_ff) +
-               ": the shared expert is read with the routed experts' width";
     if (const MetaValue* v = f.get(p + "attention.layer_norm_rms_epsilon")) {
         if (!v->is_num() || !(v->num() > 0)) return p + "attention.layer_norm_rms_epsilon must be a positive number";
         g.rms_eps = v->num();
@@ -828,7 +825,10 @@ inline std::string geometry_unsupported(const core::ModelGeometry& g) {
         {"hyper_connection.count", &core::ModelGeometry::hc},
         {"hyper_connection.low_rank", &core::ModelGeometry::hc_lr},
         {"expert_feed_forward_length", &core::ModelGeometry::n_ff},
+        {"expert_shared_feed_forward_length", &core::ModelGeometry::n_ff_shexp},
     };
+    if (c.n_ff_shexp != c.n_ff && (g.n_expert != c.n_expert || g.n_expert_used != c.n_expert_used))
+        return "qwen4exp: this unequal-width geometry requires the compiled expert count and expert_used_count";
     for (const Pin& pin : pins)
         if (g.*pin.field != c.*pin.field)
             return std::string("qwen4exp.") + pin.key + " = " + std::to_string(g.*pin.field) +

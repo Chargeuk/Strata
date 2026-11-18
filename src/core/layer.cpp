@@ -394,14 +394,14 @@ uint64_t moe_buffers_bytes(const ModelGeometry& g, int64_t k) {    const uint64_
 // weights
 (uint64_t) g.n_embd * 4,
 // shared
-strata::kernels::shared_expert_scratch_bytes(g.n_ff),
+strata::kernels::shared_expert_scratch_bytes(g.n_ff_shexp),
 // the shared expert's own scratch
 (uint64_t) (g.n_embd / 32) * 34,
 // x_q8_0
 q8k_bytes(g.n_embd),
 // x_q8k
 };    uint64_t total = 0;    for (uint64_t v : parts) total += (v + 15) & ~(uint64_t) 15;    return total;}
-uint64_t moe_buffers_init(const ModelGeometry& g, int64_t k, void* base, MoEBuffers& b) {    const uint64_t parts[] = {        (uint64_t) g.n_embd * 2, (uint64_t) g.n_embd * 2, (uint64_t) g.n_expert * 4,        (uint64_t) k * 4, (uint64_t) k * 4, (uint64_t) g.n_embd * 4,        strata::kernels::shared_expert_scratch_bytes(g.n_ff),        (uint64_t) (g.n_embd / 32) * 34, q8k_bytes(g.n_embd),    };    uint8_t* p = (uint8_t*) base;    void* ptr[9];    uint64_t total = 0;    for (int i = 0; i < 9; ++i) {        ptr[i] = p;        const uint64_t al = (parts[i] + 15) & ~(uint64_t) 15;        p += al;        total += al;    }    b.x_bf16 = (uint16_t*) ptr[0];    b.x_f16 = (uint16_t*) ptr[1];    b.logits = (float*) ptr[2];    b.ids = (int*) ptr[3];    b.weights = (float*) ptr[4];    b.shared = (float*) ptr[5];    b.sh_scratch = (float*) ptr[6];    b.x_q8_0 = (uint8_t*) ptr[7];    b.x_q8k = (uint8_t*) ptr[8];    return total;}
+uint64_t moe_buffers_init(const ModelGeometry& g, int64_t k, void* base, MoEBuffers& b) {    const uint64_t parts[] = {        (uint64_t) g.n_embd * 2, (uint64_t) g.n_embd * 2, (uint64_t) g.n_expert * 4,        (uint64_t) k * 4, (uint64_t) k * 4, (uint64_t) g.n_embd * 4,        strata::kernels::shared_expert_scratch_bytes(g.n_ff_shexp),        (uint64_t) (g.n_embd / 32) * 34, q8k_bytes(g.n_embd),    };    uint8_t* p = (uint8_t*) base;    void* ptr[9];    uint64_t total = 0;    for (int i = 0; i < 9; ++i) {        ptr[i] = p;        const uint64_t al = (parts[i] + 15) & ~(uint64_t) 15;        p += al;        total += al;    }    b.x_bf16 = (uint16_t*) ptr[0];    b.x_f16 = (uint16_t*) ptr[1];    b.logits = (float*) ptr[2];    b.ids = (int*) ptr[3];    b.weights = (float*) ptr[4];    b.shared = (float*) ptr[5];    b.sh_scratch = (float*) ptr[6];    b.x_q8_0 = (uint8_t*) ptr[7];    b.x_q8k = (uint8_t*) ptr[8];    return total;}
 bool moe_route(const WeightTable& tables, const ModelGeometry& g, int64_t layer, int64_t k, const MoEBuffers& b,               const float* x, void* stream, std::string& err, const Doorbell* db) {    using namespace strata::kernels;    const LayerView v(tables, layer);    const WeightRef* w_router = v.get("ffn_gate_inp.weight");    if (w_router == nullptr) { err = v.name("ffn_gate_inp.weight") + " is missing"; return false; }    if (k < 1 || k > 64) { err = "moe_route: k must be 1..64"; return false; }
 // ---- the router's activation.  The router's weight is BF16 and that is the one `ref/moe.py` singles out.
 if (!native_bf16_projections) f32_to_bf16_bulk(x, b.x_bf16, g.n_embd, stream);
@@ -504,7 +504,7 @@ if (w_ginp->kind != WeightKind::Bf16InF32) {        err = v.name("ffn_gate_inp_s
         shared_expert(b.x_q8_0, b.x_q8k, b.x_bf16, f_gate, p_gate.codes, p_gate.scales, p_gate.offset,
                       f_up, p_up.codes, p_up.scales, p_up.offset, f_down, p_down.codes, p_down.scales,
                       p_down.offset, (const uint16_t*) w_ginp->data, b.sh_scratch, b.shared,
-                      g.n_embd, g.n_ff, /*tpr=*/32, stream, x, &native);
+                      g.n_embd, g.n_ff_shexp, /*tpr=*/32, stream, x, &native);
     } catch (const std::exception& error) {
         err = v.name("shared_expert") + ": " + error.what();
         return false;

@@ -1112,8 +1112,8 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
             strata::kernels::moe_hit_grouped_scratch_bytes((int64_t) (T * K), g.n_embd, g.n_ff),
             strata::kernels::native_expert_scratch_bytes((int64_t) (T * K), g.n_ff)));
         head_mixed_ = b.take<float>(T * N); head_inj_ = b.take<float>(HC);
-        sh_bf16_ = b.take<uint16_t>(T * N); sh_gate_ = b.take<float>(T * (uint64_t) g.n_ff);
-        sh_up_ = b.take<float>(T * (uint64_t) g.n_ff); sh_g_ = b.take<float>(T + 4);
+        sh_bf16_ = b.take<uint16_t>(T * N); sh_gate_ = b.take<float>(T * (uint64_t) g.n_ff_shexp);
+        sh_up_ = b.take<float>(T * (uint64_t) g.n_ff_shexp); sh_g_ = b.take<float>(T + 4);
         head_logits_ = b.take<float>(T * (uint64_t) n_vocab_);
         arg_scratch_ = b.take<uint8_t>(strata::kernels::argmax_rows_scratch_bytes((int) T));
         one_ = b.take<int32_t>(4);
@@ -2311,8 +2311,8 @@ bool Verifier::record_window(int T, cudaStream_t cs, std::string& err) {
                 else for (int t = tb; t < te; ++t) f32_to_bf16_bulk(mixed_ + t * N, sh_bf16_ + t * N, N, sh_stream);
             }
             try {
-                shared_expert_multi(n, xm, sh_bf16_ + tb * N, nsw, (const uint16_t*) wgi->data, sh_gate_ + (size_t) tb * g.n_ff,
-                                    sh_up_ + (size_t) tb * g.n_ff, sh_g_ + tb, shared_ + tb * N, N, g.n_ff, sh_stream,
+                shared_expert_multi(n, xm, sh_bf16_ + tb * N, nsw, (const uint16_t*) wgi->data, sh_gate_ + (size_t) tb * g.n_ff_shexp,
+                                    sh_up_ + (size_t) tb * g.n_ff_shexp, sh_g_ + tb, shared_ + tb * N, N, g.n_ff_shexp, sh_stream,
                                     qdedup ? (const void*) (nat_xq_ + (size_t) tb * (N / 32) * 36) : nullptr,
                                     (sg_ready ? 1 : 0) | (lfuse_on(n) && g_lfuse_pair() ? 2 : 0));
                 sg_gated_[grp] = sg_ready;

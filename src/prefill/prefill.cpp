@@ -292,7 +292,7 @@ constexpr float EPS = 1e-6f;
 constexpr int64_t N = strata::core::kCompiledGeometry.n_embd, HC = strata::core::kCompiledGeometry.hc, D = N * HC, LR = strata::core::kCompiledGeometry.hc_lr, K = strata::core::kCompiledGeometry.n_expert_used, NE = strata::core::kCompiledGeometry.n_expert;
 constexpr int64_t C = strata::core::kCompiledGeometry.ssm_conv_channels, ZV = strata::core::kCompiledGeometry.ssm_value_dim, HV = strata::core::kCompiledGeometry.ssm_v_heads;
 // widths the buffers and kernel arguments below are written in (int, as the literals they replace were)
-constexpr int kEmbd = (int) strata::core::kCompiledGeometry.n_embd, kFF = (int) strata::core::kCompiledGeometry.n_ff, kFF2 = 2 * kFF;
+constexpr int kEmbd = (int) strata::core::kCompiledGeometry.n_embd, kFF = (int) strata::core::kCompiledGeometry.n_ff, kFF2 = 2 * kFF, kSharedFF = (int) strata::core::kCompiledGeometry.n_ff_shexp;
 constexpr int kNHead = (int) strata::core::kCompiledGeometry.n_head, kNKv = (int) strata::core::kCompiledGeometry.n_head_kv, kHeadDim = (int) strata::core::kCompiledGeometry.head_dim;
 constexpr int kQW = kNHead * kHeadDim, kQFull = 2 * kQW, kKvW = kNKv * kHeadDim;
 static_assert(kQW == strata::core::kCompiledGeometry.ssm_value_dim, "prefill: the attention width (heads x head_dim) and the GDN value width share the m.q / m.attn / m.attn_h buffers, so they must be equal");
@@ -2277,8 +2277,8 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused, int64_t tail = -1
     if (fp16_bufs(mp)) a.take<uint16_t>(Tf * K * N, ok);
     a.take<float>(mb.gu, ok);
     if (fp16_bufs(mp)) a.take<uint16_t>(Tf * K * kFF, ok);
-    a.take<float>(T * K * N, ok); a.take<float>(T * kFF, ok);
-    a.take<float>(T * kFF, ok); a.take<uint16_t>(T * kFF, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
+    a.take<float>(T * K * N, ok); a.take<float>(T * kSharedFF, ok);
+    a.take<float>(T * kSharedFF, ok); a.take<uint16_t>(T * kSharedFF, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
     if (mp.any) {
         a.take<uint8_t>(mb.xq, ok);
         a.take<float>(mb.h, ok);
@@ -2708,7 +2708,7 @@ bool Prefill::carve(size_t T, void* alloc) {
         m.GU = c.take<float>(mb.gu, ok);
         m.Hh = fp16_bufs(mp) ? c.take<uint16_t>(Tf * K * kFF, ok) : nullptr;
         m.Dm = c.take<float>(T * K * N, ok);
-        m.sgate = c.take<float>(T * kFF, ok); m.sup = c.take<float>(T * kFF, ok); m.sh_h = c.take<uint16_t>(T * kFF, ok);
+        m.sgate = c.take<float>(T * kSharedFF, ok); m.sup = c.take<float>(T * kSharedFF, ok); m.sh_h = c.take<uint16_t>(T * kSharedFF, ok);
         m.shared = c.take<float>(T * N, ok); m.sg = c.take<float>(T, ok);
         if (mp.any) {
             m.Xq = c.take<uint8_t>(mb.xq, ok);
