@@ -827,10 +827,11 @@ inline std::string geometry_unsupported(const core::ModelGeometry& g) {
         {"expert_feed_forward_length", &core::ModelGeometry::n_ff},
         {"expert_shared_feed_forward_length", &core::ModelGeometry::n_ff_shexp},
     };
-    if (c.n_ff_shexp != c.n_ff && (g.n_expert != c.n_expert || g.n_expert_used != c.n_expert_used))
+    const bool runtime_width = core::flash_next_runtime_width(g);
+    if (!runtime_width && c.n_ff_shexp != c.n_ff && (g.n_expert != c.n_expert || g.n_expert_used != c.n_expert_used))
         return "qwen4exp: this unequal-width geometry requires the compiled expert count and expert_used_count";
     for (const Pin& pin : pins)
-        if (g.*pin.field != c.*pin.field)
+        if (!(runtime_width && pin.field == &core::ModelGeometry::n_ff_shexp) && g.*pin.field != c.*pin.field)
             return std::string("qwen4exp.") + pin.key + " = " + std::to_string(g.*pin.field) +
                    ", the kernels are compiled for " + std::to_string(c.*pin.field);
     // one constant in the norm kernels; the files carry it as an f32, so compare at f32 precision

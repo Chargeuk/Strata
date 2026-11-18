@@ -289,10 +289,10 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr float EPS = 1e-6f;
 // the shape the engine is compiled for (include/strata/core/geometry.hpp; -DSTRATA_GEOMETRY picks it)
-constexpr int64_t N = strata::core::kCompiledGeometry.n_embd, HC = strata::core::kCompiledGeometry.hc, D = N * HC, LR = strata::core::kCompiledGeometry.hc_lr, K = strata::core::kCompiledGeometry.n_expert_used, NE = strata::core::kCompiledGeometry.n_expert;
+constexpr int64_t N = strata::core::kCompiledGeometry.n_embd, HC = strata::core::kCompiledGeometry.hc, D = N * HC, LR = strata::core::kCompiledGeometry.hc_lr, NE = strata::core::kCompiledGeometry.n_expert;
 constexpr int64_t C = strata::core::kCompiledGeometry.ssm_conv_channels, ZV = strata::core::kCompiledGeometry.ssm_value_dim, HV = strata::core::kCompiledGeometry.ssm_v_heads;
 // widths the buffers and kernel arguments below are written in (int, as the literals they replace were)
-constexpr int kEmbd = (int) strata::core::kCompiledGeometry.n_embd, kFF = (int) strata::core::kCompiledGeometry.n_ff, kFF2 = 2 * kFF, kSharedFF = (int) strata::core::kCompiledGeometry.n_ff_shexp;
+constexpr int kEmbd = (int) strata::core::kCompiledGeometry.n_embd, kFF = (int) strata::core::kCompiledGeometry.n_ff, kFF2 = 2 * kFF;
 constexpr int kNHead = (int) strata::core::kCompiledGeometry.n_head, kNKv = (int) strata::core::kCompiledGeometry.n_head_kv, kHeadDim = (int) strata::core::kCompiledGeometry.head_dim;
 constexpr int kQW = kNHead * kHeadDim, kQFull = 2 * kQW, kKvW = kNKv * kHeadDim;
 static_assert(kQW == strata::core::kCompiledGeometry.ssm_value_dim, "prefill: the attention width (heads x head_dim) and the GDN value width share the m.q / m.attn / m.attn_h buffers, so they must be equal");
@@ -1881,7 +1881,8 @@ I8Count& i8_count() {
 // exact-sized cudaMalloc that can end a 2 MiB page, and the over-read faults at the next one (Xid 31 FAULT_PDE, "prefill
 // copy_i32: an illegal memory access" on a long prompt).  The one size used by carve, bytes_needed_impl and the three
 // places that write the identity (bind_stage_helper, run_impl, lm_run).  0: the size overflows (carve fails).
-size_t mmq_ids_rows(size_t T) {
+size_t mmq_ids_rows(size_t T, int64_t K) {
+    if (K <= 0) return 0;
     if (T > (size_t) INT64_MAX / (size_t) K) return 0;
     return (size_t) mmq::mmq_ids_table_rows((uint64_t) (T * (size_t) K), (uint64_t) T);
 }
@@ -2153,7 +2154,7 @@ bool pf_group_scratch() {
 // one MMQ product range: experts [a, b) of the layer's order, and its relative bounds' offset in the bounds table
 struct MoeRange { int32_t a, b, rel; };
 // the rows one group's scratch holds: T (a single expert's most) plus three times a group's average
-int64_t group_cap_rows(size_t T, int64_t n_expert) {
+int64_t group_cap_rows(size_t T, int64_t n_expert, int64_t K) {
     // STRATA_PF_GROUP_CAP=<rows> (a test knob, at least T): a smaller cap, so that most groups run as sub-ranges
     static const int64_t forced = [] { const char* v = std::getenv("STRATA_PF_GROUP_CAP"); return v ? (int64_t) std::atoll(v) : 0; }();
     if (forced > 0) return std::max<int64_t>(forced, (int64_t) T);
@@ -2251,9 +2252,9 @@ bool p1a_pack() {
 struct MoeBufs { size_t gu, h, xq, hq; };
 // `tail` (>= 0, fused only): the MMQ rows a chunk below the floor may bring, in tokens (a lent layout sized for its
 // segment's own last chunk, loan_rules.hpp); -1: stream_all_min() - 1, as the start-up layout.
-MoeBufs moe_bufs(size_t T, int64_t n_expert, bool fused, int64_t tail = -1) {
+MoeBufs moe_bufs(size_t T, int64_t n_expert, int64_t K, bool fused, int64_t tail = -1) {
     if (!fused && pf_group_scratch()) {   // GU, H, Hq: one group's rows (Xq keeps every row: gate/up reads the layer's)
-        const size_t gc = (size_t) group_cap_rows(T, n_expert);
+        const size_t gc = (size_t) group_cap_rows(T, n_expert, K);
         return {gc * kFF2, gc * kFF, mmq::q8_bytes((int64_t) (T * K), N), mmq::q8_bytes((int64_t) gc, kFF)};
     }
     if (!fused) return {T * K * kFF2, T * K * kFF, mmq::q8_bytes((int64_t) (T * K), N), mmq::q8_bytes((int64_t) (T * K), kFF)};
@@ -2266,9 +2267,9 @@ MoeBufs moe_bufs(size_t T, int64_t n_expert, bool fused, int64_t tail = -1) {
             std::max(mmq::q8_bytes((int64_t) (ts * K), N), fused::act_bytes((int64_t) T, N)),
             mmq::q8_bytes((int64_t) (ts * K), kFF)};
 }
-uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused, int64_t tail = -1) {
+uint64_t moe_set_bytes(size_t T, int64_t n_expert, int64_t K, int64_t shared_ff, bool fused, int64_t tail = -1) {
     const MmqPlan& mp = mmq_plan();
-    const MoeBufs mb = moe_bufs(T, n_expert, fused, tail);
+    const MoeBufs mb = moe_bufs(T, n_expert, K, fused, tail);
     Alloc a; a.count_only = true; bool ok = true;
     a.take<float>(T * n_expert, ok); a.take<float>(T * K, ok); a.take<int32_t>(T * K, ok); a.take<int32_t>(T * K, ok);
     a.take<int32_t>(T * K, ok);
@@ -2277,8 +2278,8 @@ uint64_t moe_set_bytes(size_t T, int64_t n_expert, bool fused, int64_t tail = -1
     if (fp16_bufs(mp)) a.take<uint16_t>(Tf * K * N, ok);
     a.take<float>(mb.gu, ok);
     if (fp16_bufs(mp)) a.take<uint16_t>(Tf * K * kFF, ok);
-    a.take<float>(T * K * N, ok); a.take<float>(T * kSharedFF, ok);
-    a.take<float>(T * kSharedFF, ok); a.take<uint16_t>(T * kSharedFF, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
+    a.take<float>(T * K * N, ok); a.take<float>(T * shared_ff, ok);
+    a.take<float>(T * shared_ff, ok); a.take<uint16_t>(T * shared_ff, ok); a.take<float>(T * N, ok); a.take<float>(T, ok);
     if (mp.any) {
         a.take<uint8_t>(mb.xq, ok);
         a.take<float>(mb.h, ok);
@@ -2377,7 +2378,10 @@ bool Prefill::init(const core::WeightTable& wt, const core::ModelGeometry& g, co
 #endif
     m.wt = &wt; m.g = &g; m.ss = &ss; m.src = src; m.cache = cache; m.host_res = host_res;
     m.T = chunk; m.cs = (cudaStream_t) stream; m.stats = &stats_;
-    if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert < 1 || ss.k != K) {
+    const int64_t K = ss.k;
+    if (g.n_embd != N || g.hc != HC || g.hc_lr != LR || g.n_expert < 1 ||
+        K != g.n_expert_used || K < 1 || K > g.n_expert ||
+        (K != strata::core::kCompiledGeometry.n_expert_used && K != 5) || g.n_ff_shexp <= 0) {
         err = "prefill: geometry differs from the artifact's"; return false;
     }
     {   // a native pack's experts: this path's expert buffers and products (and so their Hadamard rotations) are
@@ -2651,6 +2655,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     Alloc& o = *static_cast<Alloc*>(alloc);
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
+    const int64_t K = ss.k, shared_ff = g.n_ff_shexp;
     bool ok = true;
     m.emb = o.take<float>(T * N, ok); m.R = o.take<float>(T * D, ok);
     m.xn = gr_unfused() ? o.take<float>(T * D, ok) : nullptr;   // F-1: not needed (gr_mix_r reads R)
@@ -2675,9 +2680,9 @@ bool Prefill::carve(size_t T, void* alloc) {
         // one region for the attention half's and the MoE half's scratch (see gdn_set_bytes)
         const bool fz = fused_layout(T, m.src != nullptr);
         m.fused_bufs = fz;
-        const MoeBufs mb = moe_bufs(T, m.g->n_expert, fz, m.tail_req);
+        const MoeBufs mb = moe_bufs(T, m.g->n_expert, K, fz, m.tail_req);
         const uint64_t region = std::max({gdn_set_bytes(T), qsa_set_bytes(T, m.cap, m.max_blocks, m.sel_batch,
-                                                                           m.attn_batch, s), moe_set_bytes(T, m.g->n_expert, fz, m.tail_req),
+                                                                           m.attn_batch, s), moe_set_bytes(T, m.g->n_expert, K, shared_ff, fz, m.tail_req),
                                            hcr ? hc_set_bytes(T, m.f16_io) : (uint64_t) 0});
         uint8_t* base = o.take<uint8_t>((size_t) region, ok);
         // No region: the sub-allocators below would each cudaMalloc their share (hundreds of MiB) on a card that has just
@@ -2708,7 +2713,7 @@ bool Prefill::carve(size_t T, void* alloc) {
         m.GU = c.take<float>(mb.gu, ok);
         m.Hh = fp16_bufs(mp) ? c.take<uint16_t>(Tf * K * kFF, ok) : nullptr;
         m.Dm = c.take<float>(T * K * N, ok);
-        m.sgate = c.take<float>(T * kSharedFF, ok); m.sup = c.take<float>(T * kSharedFF, ok); m.sh_h = c.take<uint16_t>(T * kSharedFF, ok);
+        m.sgate = c.take<float>(T * shared_ff, ok); m.sup = c.take<float>(T * shared_ff, ok); m.sh_h = c.take<uint16_t>(T * shared_ff, ok);
         m.shared = c.take<float>(T * N, ok); m.sg = c.take<float>(T, ok);
         if (mp.any) {
             m.Xq = c.take<uint8_t>(mb.xq, ok);
@@ -2733,7 +2738,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     for (int i = 0; i < DQ; ++i) { m.dq_gu[i] = o.take<uint16_t>(kFF2 * kEmbd, ok); m.dq_d[i] = o.take<uint16_t>(kEmbd * kFF, ok); }
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
-        const size_t ids_rows = mmq_ids_rows(T);
+        const size_t ids_rows = mmq_ids_rows(T, K);
         if (ids_rows == 0) ok = false;
         m.ids_identity = o.take<int32_t>(ids_rows, ok);   // (its over-read slack: mmq_ids_rows)
         m.bounds_dev = o.take<int32_t>(bounds_ints(m.g->n_expert), ok);
@@ -2747,7 +2752,7 @@ bool Prefill::carve(size_t T, void* alloc) {
         // lends them - a write now would corrupt a resident expert)
         if (!m.mmq_ctx) m.mmq_ctx = std::make_unique<mmq::Context>();
     } else if (i8_wants_identity()) {
-        const size_t ids_rows = mmq_ids_rows(T);
+        const size_t ids_rows = mmq_ids_rows(T, K);
         if (ids_rows == 0) ok = false;
         m.ids_identity = o.take<int32_t>(ids_rows, ok);   // OWN-I8: the identity row table of the int8 groups (no MMQ buffers in this layout)
     }
@@ -2799,7 +2804,7 @@ bool Prefill::carve(size_t T, void* alloc) {
     m.ple_norm = o.take<float>((size_t) strata::kernels::NG_HC_DIM, ok);
     take_stage(o, ss, s, m.stage, ok);
     m.T = (int64_t) T;
-    m.group_cap = pf_group_scratch() && !m.fused_bufs ? group_cap_rows(T, m.g->n_expert) : 0;
+    m.group_cap = pf_group_scratch() && !m.fused_bufs ? group_cap_rows(T, m.g->n_expert, K) : 0;
     if (m.group_cap > 0 || hcr) {   // activation evidence: once per layout (a chunk size), what the switches took
         std::fprintf(stderr, "strata prefill: chunk %zu tokens:%s%s\n", T,
                      m.group_cap > 0 ? (" STRATA_PF_GROUP_SCRATCH on (GU/H/Hq hold " + std::to_string(m.group_cap) + " rows, not " +
@@ -3147,6 +3152,7 @@ bool Prefill::set_stage_helper(Prefill* helper, std::string& err) {
 bool Prefill::bind_stage_helper(int64_t T) {
     Impl& m = *impl_;
     if (!m.help_pp || helper_ == nullptr || m.pp) return false;
+    const int64_t K = m.ss->k;
     const double frac = split_help_frac(T);
     if (frac <= 0.0 || T < stream_all_min() || m.src == nullptr || m.ring <= STAGE || fused_ring()) return false;
     const strata::kernels::cpu::ExpertLayout& lay = strata::kernels::cpu::expert_layout();
@@ -3203,13 +3209,14 @@ bool Prefill::bind_stage_helper(int64_t T) {
             return false;
     }
     const core::OnDevice on(P.dev);
-    mmq::iota(P.ident, (int64_t) mmq_ids_rows((size_t) T), P.s);   // the helper's row table (h.T >= T): a refill may have overwritten its slots
+    mmq::iota(P.ident, (int64_t) mmq_ids_rows((size_t) T, K), P.s);   // the helper's row table (h.T >= T): a refill may have overwritten its slots
     return true;
 }
 
 bool Prefill::set_peer(core::PeerExperts* peer, int64_t cap_rows, std::string& err) {
     Impl& m = *impl_;
     if (peer == nullptr || !peer->valid()) { m.pp.reset(); return true; }
+    const int64_t K = m.ss->k;
     // Without P2P the activations and the result rows take the mapped host route of the layer split's helper
     // (STRATA_PF_PEER_HOST=0: refuse as before, the prompt path then stays on the primary)
     const bool host_route_ok = [] { const char* v = std::getenv("STRATA_PF_PEER_HOST"); return v == nullptr || std::atoi(v) != 0; }();
@@ -3538,6 +3545,7 @@ uint64_t Prefill::bytes_needed_owned(const core::ModelGeometry& g, const core::S
 
 uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::SessionState& ss, int64_t chunk,
                                     bool owned_pages, bool src, int64_t tail) {
+    const int64_t K = ss.k;
     // the same allocation sequence as `init` (`carve`), counted - with the MoE layout `carve` picks for the same source
     const size_t T = (size_t) chunk;
     bool ok = true;
@@ -3572,12 +3580,12 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
     const int64_t cap = strata::kernels::qsa_selection_width(strata::kernels::kTopkMaxCells, s);
     const int64_t max_blocks = ss.qsa_states[ss.qsa_primary()].max_cells / s.idx_block + 2;
     o.take<uint8_t>((size_t) std::max({gdn_set_bytes(T), qsa_set_bytes(T, cap, max_blocks, 256, 32, s),
-                                       moe_set_bytes(T, g.n_expert, fused_layout(T, src), tail),
+                                       moe_set_bytes(T, g.n_expert, K, g.n_ff_shexp, fused_layout(T, src), tail),
                                        hcr ? hc_set_bytes(T, f16_io) : (uint64_t) 0}), ok);
     for (int i = 0; i < DQ; ++i) { o.take<uint16_t>(kFF2 * kEmbd, ok); o.take<uint16_t>(kEmbd * kFF, ok); }
     if (mmq_plan().any) {
         const MmqPlan& mp = mmq_plan();
-        const size_t ids_rows = mmq_ids_rows(T);
+        const size_t ids_rows = mmq_ids_rows(T, K);
         if (ids_rows == 0) ok = false;
         o.take<int32_t>(ids_rows, ok);   // ids_identity
         o.take<int32_t>(bounds_ints(g.n_expert), ok);
@@ -3588,7 +3596,7 @@ uint64_t Prefill::bytes_needed_impl(const core::ModelGeometry& g, const core::Se
             o.take<int32_t>(4 * ws::max_chunks((int64_t) T * K, g.n_expert), ok);
         }
     } else if (i8_wants_identity()) {
-        const size_t ids_rows = mmq_ids_rows(T);
+        const size_t ids_rows = mmq_ids_rows(T, K);
         if (ids_rows == 0) ok = false;
         o.take<int32_t>(ids_rows, ok);   // ids_identity (OWN-I8, a build without MMQ buffers)
     }
@@ -3991,6 +3999,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const core::WatchedStream watched("the prompt's GPU work", (void*) m.cs, m.device);
     const core::ModelGeometry& g = *m.g;
     core::SessionState& ss = *m.ss;
+    const int64_t K = ss.k;
     const auto t_start = Clock::now();
     const int64_t LB = stage_lb_, LE = stage_le_;
     // STRATA_KVA: the approximate-prefix plan of this run, if it qualifies (a cold read of one long prompt, one
@@ -4089,7 +4098,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
     const cudaStream_t cs = (cudaStream_t) m.cs;
     // the MMQ row table lives in the borrowed cache slots, which the refill after a prompt overwrites with experts:
     // write it again for every prompt (a layout is reused as long as the chunk and the slots are the same)
-    if (m.ids_identity != nullptr) mmq::iota(m.ids_identity, (int64_t) mmq_ids_rows((size_t) m.T), m.cs);
+    if (m.ids_identity != nullptr) mmq::iota(m.ids_identity, (int64_t) mmq_ids_rows((size_t) m.T, K), m.cs);
     // The PLE rows of a chunk are read from the model file on the host (an SSD read per missed row): the chunk
     // after this one is read on a thread while the GPU runs this one, into the other of two buffers.  The rows
     // depend only on the tokens (the two before a position name its n-grams), so this is the same data.
@@ -5322,7 +5331,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     if (!wr || !wgi || !wsg || !wsu || !wsd) return false;
                     pt.mark(kPfRouter, cs);
                     if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
-                    route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs);
+                    route(m.logits, m.ids, m.w, T, m.g->n_expert, m.cs, K);
                     // RESEARCH HOOK (141-research, opt-in, never on by default): STRATA_DBG_FEAT=<file> dumps, per MoE layer and chunk,
                     // the routed ids + weights (and for the layers in STRATA_DBG_FEAT_LAYERS the router-input hidden state, bf16);
                     // STRATA_DBG_ROUTE_OVERRIDE=<file> replaces the routing of the layers listed in that file with the file's ids + weights.
@@ -5341,7 +5350,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                             }();
                             static int64_t posl[64] = {};
                             struct Ovr { std::vector<int32_t> ids; std::vector<float> w; };
-                            static std::map<std::pair<int32_t, int32_t>, Ovr> ovr = [] {
+                            static std::map<std::pair<int32_t, int32_t>, Ovr> ovr = [K] {
                                 std::map<std::pair<int32_t, int32_t>, Ovr> mp;
                                 const char* p = std::getenv("STRATA_DBG_ROUTE_OVERRIDE");
                                 std::FILE* f = p ? std::fopen(p, "rb") : nullptr;
@@ -5387,7 +5396,7 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     auto shared_expert = [&]() -> bool {
                         if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                         if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
-                        swiglu_pair(m.sgate, m.sup, m.sh_h, T, m.cs);
+                        swiglu_pair(m.sgate, m.sup, m.sh_h, T, m.cs, g.n_ff_shexp);
                         if (!native_proj(m.gemm, wsd, m.sh_h, m.shared, T, v.name("ffn_down_shexp.weight"), err)) return false;
                         if (wgi->kind != core::WeightKind::Bf16InF32) { err = "prefill: shared gate is not BF16"; return false; }
                         m.gemm.bf16(m.mixed_bf, (const uint16_t*) wgi->data, m.sg, T, 1, N);
@@ -7093,10 +7102,10 @@ bool Prefill::run_impl(const int64_t* tokens, int64_t n, int64_t pos0, std::stri
                     else if (peer_now && m.pp->sums)
                         moe_combine_peer(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.pp->host_sum, m.pp->back_at, m.bo, T, m.cs);
                     else if (dm16_used && rows_cpu == 0)
-                        moe_combine16(reinterpret_cast<const uint16_t*>(m.Dm), m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs);
+                        moe_combine16(reinterpret_cast<const uint16_t*>(m.Dm), m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs, K);
                     else
                         moe_combine(m.Dm, m.slot_dev, m.w, m.shared, m.sg, m.bo, T, m.cs,
-                                    use_mmq && !fused_l && !fz_staged_l && lay.native && lay.fmt[(size_t) l].tail_off ? m.row_sd : nullptr);   // (fz_staged_l: the fused kernels applied s_down already)
+                                    use_mmq && !fused_l && !fz_staged_l && lay.native && lay.fmt[(size_t) l].tail_off ? m.row_sd : nullptr, K);   // (fz_staged_l: the fused kernels applied s_down already)
                     // debug: STRATA_DBG_NAN=1 reports the first layer of a chunk whose MoE produced non-finite values
                     if (static const bool dbg = std::getenv("STRATA_DBG_NAN") != nullptr; dbg) {
                         cudaStreamSynchronize(m.cs);
@@ -7593,6 +7602,7 @@ void Prefill::lm_release() {
 int64_t Prefill::lm_prepare(int64_t n, std::string& why, int64_t cap) {
     Impl& m = *impl_;
     if (m.g == nullptr) { why = "not initialized"; return 0; }
+    const int64_t K = m.ss->k;
 #if defined(STRATA_USE_HIP) || defined(STRATA_HIP_GFX906)
     // only NVIDIA CUDA has run this path by default; on an AMD build the prompt stays on the chunk-major path unless
     // STRATA_LM_HIP=1 (opt-in, PAR-A 2026-10-30: gfx1201 is being qualified)
@@ -7851,6 +7861,7 @@ bool Prefill::run_multi(const std::vector<Seg>& segs, std::string& err) {
 bool Prefill::lm_run(const std::vector<Seg>& segs, int depth, const std::vector<LmSub>* given_super, std::string& err) {
     err.clear();
     Impl& m = *impl_;
+    const int64_t K = m.ss->k;
     const core::OnDevice on_device(m.device);
     const core::ModelGeometry& g = *m.g;
     // the session of segment i on THIS stage: the segment's own (stage depth `depth`), else this stage's main session
@@ -7881,7 +7892,7 @@ bool Prefill::lm_run(const std::vector<Seg>& segs, int depth, const std::vector<
     PfTimer pt;
     // the MMQ row table lives in the borrowed cache slots when the prompt path borrows: written for every prompt
     // (none without an MMQ layer: the FP16 path has no such table)
-    if (m.ids_identity) mmq::iota(m.ids_identity, (int64_t) mmq_ids_rows((size_t) m.T), m.cs);
+    if (m.ids_identity) mmq::iota(m.ids_identity, (int64_t) mmq_ids_rows((size_t) m.T, K), m.cs);
     // ---- the PLE rows, read per chunk on a thread as run_impl does (the same state machine, in chunk order)
     const bool ple_on = m.ss->ple.ready();
     const bool ple_batch_env = ple_batch_enabled();
@@ -8820,10 +8831,10 @@ bool Prefill::lm_run(const std::vector<Seg>& segs, int depth, const std::vector<
                         if (!wr || !wgi || !wsg || !wsu || !wsd) return false;
                         pt.mark(kPfRouter, cs);
                         if (!bf16_proj(m.gemm, wr, m.mixed_bf, m.logits, T, v.name("ffn_gate_inp.weight"), err, 0, m.mixed_bf_lo)) return false;
-                        route(m.logits, lb.ids + t0 * K, lb.w + t0 * K, T, m.g->n_expert, cs);
+                        route(m.logits, lb.ids + t0 * K, lb.w + t0 * K, T, m.g->n_expert, cs, K);
                         if (!native_proj(m.gemm, wsg, m.mixed_h, m.sgate, T, v.name("ffn_gate_shexp.weight"), err)) return false;
                         if (!native_proj(m.gemm, wsu, m.mixed_h, m.sup, T, v.name("ffn_up_shexp.weight"), err)) return false;
-                        swiglu_pair(m.sgate, m.sup, m.sh_h, T, cs);
+                        swiglu_pair(m.sgate, m.sup, m.sh_h, T, cs, g.n_ff_shexp);
                         if (!native_proj(m.gemm, wsd, m.sh_h, m.shared, T, v.name("ffn_down_shexp.weight"), err)) return false;
                         if (wgi->kind != core::WeightKind::Bf16InF32) { err = "prefill: shared gate is not BF16"; return false; }
                         m.gemm.bf16(m.mixed_bf, (const uint16_t*) wgi->data, m.sg, T, 1, N);
@@ -8948,6 +8959,7 @@ bool Prefill::reserve_uploads(int64_t T) {
     bool ok = true;
     if (impl_ != nullptr && T > 0) {
         Impl& m = *impl_;
+        const int64_t K = m.ss ? m.ss->k : strata::core::kCompiledGeometry.n_expert_used;
         const core::OnDevice on_device(m.device);   // (the ring is the device's that is current at its first use)
         // a text chunk's largest pageable uploads through the ring: the routing tables (and their ids down, T x K
         // each); the PLE rows when they could not be pinned (T x N).  A picture's rows are not covered.

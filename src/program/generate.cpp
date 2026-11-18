@@ -4789,13 +4789,13 @@ int main(int argc, char** argv) {
         const long long wr = w ? std::atoll(w) : 0;
         if (n > 0 && n < o.adapt_every && wr > 0) { o.adapt_warm_every = n; o.adapt_warm_rounds = wr; }
     }
+    if (strata::core::kCompiledGeometry.n_ff_shexp != strata::core::kCompiledGeometry.n_ff &&
+        o.native_preset.empty()) {
+        std::fprintf(stderr, "strata generate: this unequal-width geometry requires --native\n");
+        return 2;
+    }
+#if !defined(STRATA_CUDA_FLASH_NEXT_RUNTIME_AZ)
     if (strata::core::kCompiledGeometry.n_ff_shexp != strata::core::kCompiledGeometry.n_ff) {
-#if defined(STRATA_GEOMETRY_FLASH_NEXT_AZ)
-        if (o.prefill_until > 0) {
-            std::fprintf(stderr, "strata generate: --prefill-until is not supported by flash_next_az: the remaining prompt would be skipped\n");
-            return 2;
-        }
-#endif
         if (o.native_preset.empty() || !o.mtp.empty() || !o.draft.empty() || o.vision ||
             !o.layer_split.empty() || o.peer_device >= 1 ||
             std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int n) { return n > 0; }) ||
@@ -4804,7 +4804,9 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+#endif
     strata::core::layer_set_shared_early(!o.shared_late);
+    bool az_model = false;
     if (!o.native_preset.empty()) {
         try {
             // every shard of the model (<name>-0000N-of-0000M.gguf beside --native).  A missing shard is an error
@@ -4819,6 +4821,29 @@ int main(int argc, char** argv) {
                     std::fprintf(stderr, "strata generate: --native %s: %s\n", o.native_preset.c_str(), why.c_str());
                     return 2;
                 }
+#if defined(STRATA_CUDA_FLASH_NEXT_RUNTIME_AZ)
+                strata::core::ModelGeometry model_geometry;
+                int64_t model_k = 0;
+                std::string geometry_error;
+                if (!strata::core::geometry_from_gguf(meta, model_geometry, model_k, geometry_error)) {
+                    std::fprintf(stderr, "strata generate: %s\n", geometry_error.c_str());
+                    return 2;
+                }
+                az_model = strata::core::is_flash_next_az(model_geometry);
+                if (az_model) {
+                    if (o.prefill_until > 0) {
+                        std::fprintf(stderr, "strata generate: --prefill-until is not supported by flash_next_az: the remaining prompt would be skipped\n");
+                        return 2;
+                    }
+                    if (!o.mtp.empty() || !o.draft.empty() || !o.draft_model.empty() || o.vision ||
+                        !o.layer_split.empty() || o.peer_device >= 1 ||
+                        std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int n) { return n > 0; }) ||
+                        std::any_of(o.expert_cache_remote_auto.begin(), o.expert_cache_remote_auto.end(), [](bool on) { return on; })) {
+                        std::fprintf(stderr, "strata generate: flash_next_az supports single-GPU text without draft models only\n");
+                        return 2;
+                    }
+                }
+#endif
             }
             // --ple-gguf defaults to the shard that holds the PLE table, found by name: shard 2 of the ISTA files
             // and of Unsloth's UD-Q4_K_XL, shard 1 of Swift's
@@ -5110,6 +5135,10 @@ int main(int argc, char** argv) {
         }
     }
     const bool native_pack = strata::kernels::cpu::expert_layout().native;
+    if (az_model && !native_pack) {
+        std::fprintf(stderr, "strata generate: flash_next_az requires a native expert pack\n");
+        return 2;
+    }
     // STRATA_MMQ_DIRECT: the room each sized expert slot keeps after its blob (0 unless it is on: the slot costs and
     // the arena are then today's, byte for byte)
     const int64_t slot_guard = native_pack ? (int64_t) strata::prefill::Prefill::slot_guard_bytes() : 0;

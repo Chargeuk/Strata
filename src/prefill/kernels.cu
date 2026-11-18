@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 
 #include "strata/core/geometry.hpp"
 
@@ -2231,7 +2232,7 @@ __global__ void __launch_bounds__(S) gdn_out_norm_kernel(const float* __restrict
 }
 
 // ---------------------------------------------------------------- MoE
-template <int REG>
+template <int REG, int KU>
 __global__ void route_kernel(const float* __restrict__ logits, int32_t* __restrict__ ids, float* __restrict__ wout,
                              int64_t T) {
     const int64_t t = (int64_t) blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5);
@@ -2320,7 +2321,7 @@ __global__ void swiglu_split_f16_kernel(const float* __restrict__ gu, uint16_t* 
 __global__ void swiglu_pair_kernel(const float* __restrict__ g, const float* __restrict__ u, uint16_t* __restrict__ h16,
                                    int64_t n) {
     const int64_t i = (int64_t) blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n * strata::core::kCompiledGeometry.n_ff_shexp) return;
+    if (i >= n) return;
     const float a = g[i];
     h16[i] = hf_sat(a / (1.0f + __expf(-a)) * u[i]);
 }
@@ -2332,6 +2333,7 @@ __global__ void gather_rows16_kernel(const uint16_t* __restrict__ x, const int32
     const int64_t r = i / per, j = i % per;
     reinterpret_cast<uint4*>(dst)[r * per + j] = reinterpret_cast<const uint4*>(x)[(int64_t) src[r] * per + j];
 }
+template <int KU>
 __global__ void moe_combine_kernel(const float* __restrict__ Dm, const int32_t* __restrict__ slot,
                                    const float* __restrict__ w, const float* __restrict__ shared,
                                    const float* __restrict__ sg, float* __restrict__ bo, int64_t T,
@@ -2351,6 +2353,7 @@ __global__ void moe_combine_kernel(const float* __restrict__ Dm, const int32_t* 
 
 // W (X5): four columns per thread, one float4 load per slot; the per-element expression and the k order are unchanged
 // (bitwise equal to moe_combine_kernel). Needs 16-byte aligned Dm / shared / bo (N * 4 bytes per row is a multiple of 16).
+template <int KU>
 __global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t* __restrict__ slot,
                                     const float* __restrict__ w, const float4* __restrict__ shared,
                                     const float* __restrict__ sg, float4* __restrict__ bo, int64_t T,
@@ -2383,6 +2386,7 @@ __global__ void moe_combine4_kernel(const float* __restrict__ Dm, const int32_t*
 
 // moe_combine4_kernel with the expert rows as FP16 (fused::dm_f16_used(): the down kernels wrote 2,560 halves a row): the same fmaf order, the rows
 // widened to FP32 first.  Half the bytes of the layer's rows, read once.  (Round 0215, from the Strix dm16 patch.)
+template <int KU>
 __global__ void moe_combine16_kernel(const uint16_t* __restrict__ Dm, const int32_t* __restrict__ slot,
                                      const float* __restrict__ w, const float4* __restrict__ shared,
                                      const float* __restrict__ sg, float4* __restrict__ bo, int64_t T) {
@@ -3238,14 +3242,21 @@ void gdn_recurrence_state_only(float* state, const float* h, const float* gate, 
     gdn_recurrence_impl(head && !serial ? 1 : 0, state, h, gate, beta, nullptr, nullptr, 0.0f, y, nullptr, T,
                         stream, 0, /*with_out=*/false);
 }
-void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream) {
-    if (n_expert == 512)
-        route_kernel<16><<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
-    else if (n_expert == 256)
-        route_kernel<8><<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
-    else
-        strata::kernels::router_top10(logits, (int) T, (int) n_expert, KU, ids, weights, stream);
+void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream, int64_t k) {
+    if (k != KU && k != 5) throw std::invalid_argument("prefill route: unsupported expert count");
+    if (n_expert == 512) {
+        if (k == KU) route_kernel<16, KU><<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
+        else route_kernel<16, 5><<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
+    } else if (n_expert == 256) {
+        if (k == KU) route_kernel<8, KU><<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
+        else route_kernel<8, 5><<<(unsigned) ((T + 7) / 8), 256, 0, (cudaStream_t) stream>>>(logits, ids, weights, T);
+    } else {
+        strata::kernels::router_top10(logits, (int) T, (int) n_expert, (int) k, ids, weights, stream);
+    }
     check("route");
+}
+void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream) {
+    route(logits, ids, weights, T, n_expert, stream, KU);
 }
 void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream) {
     blob_dequant_kernel<false><<<blocks_for((int64_t) BLOB_GU_ROWS * BLOB_ROW_GU + (int64_t) N * BLOB_ROW_D), 256, 0, (cudaStream_t) stream>>>(blob, gu16, down16);
@@ -3281,9 +3292,13 @@ void swiglu_split_f16(const float* gu, uint16_t* h16, int64_t rows, int n_ff, bo
     swiglu_split_f16_kernel<<<blocks_for(rows * n_ff), 256, 0, (cudaStream_t) stream>>>(gu, h16, rows, n_ff, interleaved);
     check("swiglu_split_f16");
 }
-void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream) {
-    swiglu_pair_kernel<<<blocks_for(n * strata::core::kCompiledGeometry.n_ff_shexp), 256, 0, (cudaStream_t) stream>>>(g, u, h16, n);
+void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream, int64_t width) {
+    const int64_t elements = n * width;
+    swiglu_pair_kernel<<<blocks_for(elements), 256, 0, (cudaStream_t) stream>>>(g, u, h16, elements);
     check("swiglu_pair");
+}
+void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream) {
+    swiglu_pair(g, u, h16, n, stream, strata::core::kCompiledGeometry.n_ff_shexp);
 }
 namespace {
 __global__ void copy_i32_kernel(int32_t* __restrict__ dst, const int32_t* __restrict__ src, int64_t n) {
@@ -3420,24 +3435,39 @@ void peer_scatter_add(float* sum, const float* rows, const float* wk, const int3
     check("peer_scatter_add");
 }
 void moe_combine(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
-                 int64_t T, void* stream, const float* row_sd) {
+                 int64_t T, void* stream, const float* row_sd, int64_t k) {
+    if (k != KU && k != 5) throw std::invalid_argument("prefill combine: unsupported expert count");
 #ifndef STRATA_W_NO_COMB
     if (((reinterpret_cast<uintptr_t>(Dm) | reinterpret_cast<uintptr_t>(shared) | reinterpret_cast<uintptr_t>(bo)) & 15) == 0) {
-        moe_combine4_kernel<<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
+        if (k == KU) moe_combine4_kernel<KU><<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
+            Dm, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T, row_sd);
+        else moe_combine4_kernel<5><<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
             Dm, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T, row_sd);
         check("moe_combine");
         return;
     }
 #endif
-    moe_combine_kernel<<<blocks_for(T * N), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T, row_sd);
+    if (k == KU) moe_combine_kernel<KU><<<blocks_for(T * N), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T, row_sd);
+    else moe_combine_kernel<5><<<blocks_for(T * N), 256, 0, (cudaStream_t) stream>>>(Dm, slot, w, shared, sg, bo, T, row_sd);
     check("moe_combine");
 }
 void moe_combine16(const uint16_t* Dm16, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo, int64_t T,
-                   void* stream) {
+                   void* stream, int64_t k) {
+    if (k != KU && k != 5) throw std::invalid_argument("prefill combine16: unsupported expert count");
     if (T <= 0) return;
-    moe_combine16_kernel<<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
+    if (k == KU) moe_combine16_kernel<KU><<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
+        Dm16, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T);
+    else moe_combine16_kernel<5><<<blocks_for(T * (N / 4)), 256, 0, (cudaStream_t) stream>>>(
         Dm16, slot, w, reinterpret_cast<const float4*>(shared), sg, reinterpret_cast<float4*>(bo), T);
     check("moe_combine16");
+}
+void moe_combine(const float* Dm, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
+                 int64_t T, void* stream, const float* row_sd) {
+    moe_combine(Dm, slot, w, shared, sg, bo, T, stream, row_sd, KU);
+}
+void moe_combine16(const uint16_t* Dm16, const int32_t* slot, const float* w, const float* shared, const float* sg,
+                   float* bo, int64_t T, void* stream) {
+    moe_combine16(Dm16, slot, w, shared, sg, bo, T, stream, KU);
 }
 void moe_shared_init(const float* shared, const float* sg, float* acc, int64_t T, void* stream) {
     if (T <= 0) return;

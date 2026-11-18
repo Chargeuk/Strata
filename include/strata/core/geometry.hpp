@@ -83,6 +83,21 @@ struct ModelGeometry {
 
 namespace strata::core {
 
+// Only the stock CUDA Flash-Next builds opt into the second, exact MoE shape.
+inline constexpr bool is_flash_next_az(const ModelGeometry& g) {
+    return g.family == ModelFamily::Qwen4Exp && g.n_expert == 512 && g.n_expert_used == 5 &&
+           g.n_ff == 640 && g.n_ff_shexp == 1280;
+}
+inline constexpr bool flash_next_runtime_width(const ModelGeometry& g) {
+#if defined(STRATA_CUDA_FLASH_NEXT_RUNTIME_AZ)
+    return g.family == ModelFamily::Qwen4Exp && g.n_ff == 640 &&
+           (g.n_ff_shexp == 640 || is_flash_next_az(g));
+#else
+    (void) g;
+    return false;
+#endif
+}
+
 /// True for the full-attention layers.  `docs/semantics.md` gives this twice over - `full_attention_interval
 /// = 4` and an explicit `attention.compress_ratios` array - and `read_geometry` checks that the two agree.
 inline bool is_qsa_layer(const ModelGeometry& g, int64_t layer) {

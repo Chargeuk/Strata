@@ -89,16 +89,30 @@ void gdn_recurrence_state_only(float* state, const float* h, const float* gate, 
                                int64_t T, void* stream);
 
 // ---- MoE
-/// softmax over 512, top-10 (ties to the lower id), weights renormalised over the ten (the native router).
+/// Softmax and top-k (ties to the lower id), with selected weights renormalised.
 void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream);
+#if defined(STRATA_GPU_METAL)
+inline void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream, int64_t) {
+    route(logits, ids, weights, T, n_expert, stream);
+}
+#else
+void route(const float* logits, int32_t* ids, float* weights, int64_t T, int64_t n_expert, void* stream, int64_t k);
+#endif
 /// Expert blob (Strata pack layout, Q2_0) -> BF16 matrices: gate/up interleaved [1280, 2560], down [2560, 640].
 void blob_dequant(const uint8_t* blob, uint16_t* gu16, uint16_t* down16, void* stream);
 /// h16[n, r] = fp16(silu(gu[n, 2r]) * gu[n, 2r + 1])   (the interleaved expert gate/up)
 void swiglu_interleaved(const float* gu, uint16_t* h16, int64_t n, void* stream);
 /// the Volta prompt experts: SwiGLU of gate/up rows (gate first, or interleaved) to FP16, saturated like swiglu_interleaved
 void swiglu_split_f16(const float* gu, uint16_t* h16, int64_t rows, int n_ff, bool interleaved, void* stream);
-/// h16[n, r] = fp16(silu(g[n, r]) * u[n, r])   (the shared expert, gate and up separate, width 640)
+/// h16[n, r] = fp16(silu(g[n, r]) * u[n, r])   (the shared expert, gate and up separate)
 void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream);
+#if defined(STRATA_GPU_METAL)
+inline void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream, int64_t) {
+    swiglu_pair(g, u, h16, n, stream);
+}
+#else
+void swiglu_pair(const float* g, const float* u, uint16_t* h16, int64_t n, void* stream, int64_t width);
+#endif
 /// dst[i] = src[i] for n int32s, as a kernel: either side may be mapped host memory, and the copy never waits
 /// behind the copy engine's queue (the prompt path's grouping tables, while the expert stream fills it).
 void copy_i32(int32_t* dst, const int32_t* src, int64_t n, void* stream);
@@ -113,9 +127,27 @@ void gather_rows16(const uint16_t* x16, const int32_t* src, uint16_t* dst16, int
 /// bo[t, :] = shared[t, :] * sigmoid(sg[t]) + sum_k w[t, k] * D[slot[t, k], :]
 void moe_combine(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
                  int64_t T, void* stream, const float* row_sd = nullptr);
+#if defined(STRATA_GPU_METAL)
+inline void moe_combine(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
+                        int64_t T, void* stream, const float* row_sd, int64_t) {
+    moe_combine(D, slot, w, shared, sg, bo, T, stream, row_sd);
+}
+#else
+void moe_combine(const float* D, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo,
+                 int64_t T, void* stream, const float* row_sd, int64_t k);
+#endif
 /// moe_combine with the expert rows as FP16 (2,560 halves a row, fused::dm_f16_used()); shared and bo 16-byte aligned.
 void moe_combine16(const uint16_t* Dm16, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo, int64_t T,
                    void* stream);
+#if defined(STRATA_GPU_METAL)
+inline void moe_combine16(const uint16_t* Dm16, const int32_t* slot, const float* w, const float* shared, const float* sg,
+                          float* bo, int64_t T, void* stream, int64_t) {
+    moe_combine16(Dm16, slot, w, shared, sg, bo, T, stream);
+}
+#else
+void moe_combine16(const uint16_t* Dm16, const int32_t* slot, const float* w, const float* shared, const float* sg, float* bo, int64_t T,
+                   void* stream, int64_t k);
+#endif
 /// Layer-major prefill (STRATA_PREFILL_LAYER_MAJOR=1): acc[t, :] = shared[t, :] * sigmoid(sg[t]) - the shared expert's
 /// part of moe_combine, written before the routed experts are known.
 void moe_shared_init(const float* shared, const float* sg, float* acc, int64_t T, void* stream);

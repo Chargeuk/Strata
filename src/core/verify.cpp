@@ -939,7 +939,11 @@ bool Verifier::init(const WeightTable& wt, const ModelGeometry& g, SessionState&
         err = "verify: " + why + " (the verify window reproduces the default native decode path)";
         return false;
     }
-    if (!strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr) || ss.k != (int) strata::core::kCompiledGeometry.n_expert_used || g.ssm_state_size != 128 ||
+    const bool runtime_k = strata::core::flash_next_runtime_width(g) && ss.k == g.n_expert_used &&
+                           (strata::core::is_flash_next_az(g) || ss.k == 10);
+    if (!strata::kernels::fused_gr_supported(g.n_embd, g.hc, g.hc_lr) ||
+        (strata::core::flash_next_runtime_width(g) && strata::core::is_flash_next_az(g) && ss.k != g.n_expert_used) ||
+        (ss.k != (int) strata::core::kCompiledGeometry.n_expert_used && !runtime_k) || g.ssm_state_size != 128 ||
         g.ssm_d_conv != 4) {
         err = "verify: geometry differs from the artifact's";
         return false;

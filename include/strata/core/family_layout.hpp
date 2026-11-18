@@ -102,7 +102,8 @@ inline std::string compiled_geometry_mismatch(const ModelGeometry& g) {
     if (g.family != c.family)
         return std::string("the model is ") + strata::model_family_title(g.family) + ", this engine's kernels are built "
                "for " + strata::model_family_title(c.family);
-    if (c.n_ff_shexp != c.n_ff && (g.n_expert != c.n_expert || g.n_expert_used != c.n_expert_used))
+    const bool runtime_width = flash_next_runtime_width(g);
+    if (!runtime_width && c.n_ff_shexp != c.n_ff && (g.n_expert != c.n_expert || g.n_expert_used != c.n_expert_used))
         return "this unequal-width geometry requires the compiled expert count and expert_used_count";
     struct F {
         const char* what;
@@ -126,7 +127,7 @@ inline std::string compiled_geometry_mismatch(const ModelGeometry& g) {
         {"hyper_connection.count", g.hc, c.hc},
         {"hyper_connection.low_rank", g.hc_lr, c.hc_lr},
         {"expert_feed_forward_length", g.n_ff, c.n_ff},
-        {"expert_shared_feed_forward_length", g.n_ff_shexp, c.n_ff_shexp},
+        {"expert_shared_feed_forward_length", g.n_ff_shexp, runtime_width ? g.n_ff_shexp : c.n_ff_shexp},
         {"the in-file MTP layers", g.n_mtp_layers, c.n_mtp_layers},
     };
     for (const F& f : fields)

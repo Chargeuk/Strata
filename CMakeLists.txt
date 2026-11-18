@@ -108,6 +108,10 @@ option(STRATA_ENABLE_HIP "Build the HIP targets for wave32 AMD GPUs (gfx1100, gf
 if(_strata_geo_label STREQUAL "flash_next_az" AND (NOT STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP OR STRATA_HIP_GFX906))
   message(FATAL_ERROR "flash_next_az requires the CUDA backend")
 endif()
+if(STRATA_ENABLE_CUDA AND NOT STRATA_ENABLE_HIP AND NOT STRATA_HIP_GFX906 AND
+   NOT STRATA_GEOMETRY_FILE AND (STRATA_GEOMETRY STREQUAL "flash_next" OR STRATA_GEOMETRY STREQUAL "flash_next_az"))
+  add_compile_definitions(STRATA_CUDA_FLASH_NEXT_RUNTIME_AZ=1)
+endif()
 option(STRATA_PREFILL_MMQ "Build the optional GGML MMQ prefill path for HIP (only together with STRATA_MMQ=ON)" OFF)
 # P4-SPLIT: llama.cpp's MMQ prompt kernels (strata_mmq, strata_mmq_w4a4, strata_kq) are built only with -DSTRATA_MMQ=ON: on CUDA, and on HIP
 # together with STRATA_PREFILL_MMQ=ON.  The default (OFF) leaves them out of both.  Strata's own prompt kernels (strata_pf_own: the fused experts
