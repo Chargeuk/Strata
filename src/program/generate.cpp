@@ -4835,11 +4835,11 @@ int main(int argc, char** argv) {
                         std::fprintf(stderr, "strata generate: --prefill-until is not supported by flash_next_az: the remaining prompt would be skipped\n");
                         return 2;
                     }
-                    if (!o.mtp.empty() || !o.draft.empty() || !o.draft_model.empty() || o.vision ||
+                    if (o.draft == "dflash2" || !o.draft_model.empty() || o.vision ||
                         !o.layer_split.empty() || o.peer_device >= 1 ||
                         std::any_of(o.expert_cache_remote.begin(), o.expert_cache_remote.end(), [](int n) { return n > 0; }) ||
                         std::any_of(o.expert_cache_remote_auto.begin(), o.expert_cache_remote_auto.end(), [](bool on) { return on; })) {
-                        std::fprintf(stderr, "strata generate: flash_next_az supports single-GPU text without draft models only\n");
+                        std::fprintf(stderr, "strata generate: flash_next_az supports single-GPU text without DFlash2 only\n");
                         return 2;
                     }
                 }
@@ -7650,6 +7650,7 @@ int main(int argc, char** argv) {
     // Secure MTP's CUDA0 allocations before the large host arena is registered with both CUDA contexts.
     // In particular WDDM can refuse the draft weights after mapping tens of GiB of host pages.
     strata::core::MtpDrafter mtp;
+    mtp.set_az_target(az_model);
 #if defined(STRATA_HAVE_DFLASH2)
     strata::core::Dflash2Drafter df2;   // --draft dflash2
     bool use_df2 = false;
@@ -7661,7 +7662,8 @@ int main(int argc, char** argv) {
 #endif
     // the draft layer's geometry (the canonical model's MTP head), `static` because MtpDrafter keeps a reference; the batch
     // slots' draft-KV copies use this one too
-    static const strata::core::ModelGeometry draft_geometry = strata::core::kCompiledGeometry;
+    static const strata::core::ModelGeometry canonical_draft_geometry{};
+    const strata::core::ModelGeometry& draft_geometry = az_model ? canonical_draft_geometry : strata::core::kCompiledGeometry;
     std::vector<std::unique_ptr<strata::core::MtpDrafter>> slot_mtp;
     // KVA (0.2.7: opt-in with STRATA_KVA=1; unset is the exact 0.2.6 path): what only the engine knows.  A layer split and
     // the batch slots read their prompts in pieces and in stages, which the one-device, one-cold-read rule of the

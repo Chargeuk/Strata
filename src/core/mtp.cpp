@@ -340,6 +340,24 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
         }
         std::vector<uint8_t> blob;
         if (!read_file(rt_dir + "/dense.bin", blob)) { err = "mtp: cannot read dense.bin"; return false; }
+        if (az_target_) {
+            const char* names[] = {"mlp.shared_expert.gate_proj.weight", "mlp.shared_expert.up_proj.weight",
+                                   "mlp.shared_expert.down_proj.weight"};
+            for (int i = 0; i < 3; ++i) {
+                const int64_t rows = i == 2 ? 2560 : 640, cols = i == 2 ? 640 : 2560;
+                const uint64_t bytes = (uint64_t) rows * (uint64_t) (cols / 32) * 34;
+                int found = 0;
+                for (const auto& t : tensors_) if (t.name == names[i]) {
+                    ++found;
+                    if (t.kind != "q8_0" || t.rows != rows || t.cols != cols || t.bytes != bytes ||
+                        t.off > blob.size() || t.bytes > blob.size() - t.off) {
+                        err = std::string("mtp: invalid AZ draft shared matrix ") + names[i];
+                        return false;
+                    }
+                }
+                if (found != 1) { err = std::string("mtp: missing or duplicate AZ draft shared matrix ") + names[i]; return false; }
+            }
+        }
         const cudaError_t alloc = cudaMalloc((void**) &dense_, blob.size());
         if (alloc != cudaSuccess) {
             size_t free_bytes = 0, total_bytes = 0;
@@ -439,7 +457,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     if (floor_on_ && !mapped(64, (void**) &h_floor_, (void**) &m_floor_)) { err = "mtp: the window floor does not fit"; return false; }
     cap_ = (((window_ > 0 ? window_ : max_cells) + 63) / 64) * 64;
     attn_scratch_floats_ = (int64_t) strata::kernels::qsa_decode_attn_scratch_floats(cap_, s);
-    const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) ss.k;
+    const uint64_t T = (uint64_t) max_t, N = (uint64_t) g.n_embd, HC = (uint64_t) g.hc, K = (uint64_t) g.n_expert_used;
     const uint64_t NH = (uint64_t) g.n_head, HD = (uint64_t) g.head_dim, NKV = (uint64_t) g.n_head_kv;
     const uint64_t R2 = 2 * T;   // step/pos rows: T catch-up rows + up to T-2 chain steps
     bool ok = mapped(T * 4 + 64, (void**) &h_tok_, (void**) &m_tok_) &&
@@ -1182,9 +1200,8 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
     using namespace strata::kernels;
     if (!decode_ready(err)) return false;   // this is the 512 experts' only reader
     const ModelGeometry& g = *g_;
-    SessionState& ss = *ss_;
     const int T = 1;
-    const int64_t N = g.n_embd, HC = g.hc, K = ss.k, NH = g.n_head, HD = g.head_dim;
+    const int64_t N = g.n_embd, HC = g.hc, K = g.n_expert_used, NH = g.n_head, HD = g.head_dim;
     const QsaShapes s = shapes_of(g);
     const GrShapes gs{g.n_embd, g.hc, g.hc_lr};
     const int32_t* step = step_ + step_row * 4;

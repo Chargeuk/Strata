@@ -407,6 +407,15 @@ def cmd_mtp(a) -> int:
     tools/mtp_rt.py take it as they take Qwen's own: the 31 tensors, experts fused as gate_up_proj / down_proj."""
     import hashlib
     ck = Checkpoint(a.model, partial_ok=True)
+    shared = {"mtp.layers.0.mlp.shared_expert.gate_proj.weight": [1280, 2560],
+              "mtp.layers.0.mlp.shared_expert.up_proj.weight": [1280, 2560],
+              "mtp.layers.0.mlp.shared_expert.down_proj.weight": [2560, 1280]}
+    padded_shared = any(name in ck and ck.shape(name) == shape for name, shape in shared.items())
+    if padded_shared:
+        for name, shape in shared.items():
+            if name not in ck or ck.shape(name) != shape:
+                sys.exit("inconsistent padded MTP shared projection %s: expected %s, got %s" %
+                         (name, shape, ck.shape(name) if name in ck else "missing"))
     out = pathlib.Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     manifest = []
@@ -421,7 +430,13 @@ def cmd_mtp(a) -> int:
     for name in sorted(k for k in ck.meta if k.startswith("mtp.") and ".experts." not in k):
         if ck.dtype(name) != "BF16":
             sys.exit("%s is %s, expected BF16" % (name, ck.dtype(name)))
-        put(name, ck.array(name, np.uint16), ck.shape(name))
+        bits = ck.array(name, np.uint16)
+        if padded_shared and name in shared:
+            padding = bits[:, 640:] if name.endswith("down_proj.weight") else bits[640:, :]
+            if np.any(padding):
+                sys.exit("nonzero padding in MTP shared projection %s" % name)
+            bits = bits[:, :640] if name.endswith("down_proj.weight") else bits[:640, :]
+        put(name, bits, bits.shape)
     n_exp = 512
     for fused, parts in (("mtp.layers.0.mlp.experts.gate_up_proj", ("gate_proj", "up_proj")),
                          ("mtp.layers.0.mlp.experts.down_proj", ("down_proj",))):

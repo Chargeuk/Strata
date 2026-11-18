@@ -47,6 +47,8 @@ public:
     /// Call before the VRAM expert tier is sized: this takes ~0.9 GB.
     bool load(const std::string& rt_dir, const ModelGeometry& g, SessionState& ss, int max_t, std::string& err,
               int64_t window = 32768, const MtpDrafter* shared = nullptr);
+    /// Check the canonical draft's shared matrices before loading it for an AZ target.
+    void set_az_target(bool on) { az_target_ = on; }
     /// The prompt's length: prefill() skips the cells the attention window can never reach again.
     void set_prompt_len(int64_t n) { prompt_len_ = n; }
     /// STRATA_ROUTE_RESIDENT_MTP=1 (EXPERIMENTAL, opt-in, changes the output): the draft layer's router is biased like
@@ -276,6 +278,7 @@ private:
     int max_drafts_ = 1 << 30;
     bool hnorm_stream_ = false;
     bool q4_ = false, q4_head_ = false;
+    bool az_target_ = false;
     uint8_t* dense4_ = nullptr;              ///< --mtp-q4: Q4_0 copies of the Q8_0 tensors
     std::vector<std::pair<std::string, uint64_t>> q4_off_;
     int dhead_type_ = -1;                    ///< the draft head subset's ggml type (the main head's, or Q4_0)
